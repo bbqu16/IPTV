@@ -1,0 +1,85 @@
+name: 'WhiteList BlackList'
+on:
+  schedule:
+    - cron: '0 16 * * 4'
+  workflow_dispatch:
+    inputs:
+      source_urls:
+        description: '直播源地址（多个用空格/换行/逗号分隔，留空=使用urls.txt）'
+        required: false
+        default: ''
+
+jobs:
+  run-job:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5.2.0
+        with:
+          python-version: '3.10'
+
+      - name: 安装系统依赖
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install Cloudflare WARP
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl gpg lsb-release
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update && sudo apt-get install -y cloudflare-warp
+
+      - name: Register and connect to WARP
+        run: |
+          sudo warp-cli --accept-tos registration new
+          sudo warp-cli --accept-tos connect
+
+          MAX_ATTEMPTS=6
+          ATTEMPT=1
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            if curl -6 -s -o /dev/null https://ipv6.test-ipv6.com/; then
+              echo "✅ IPv6 正常"
+              break
+            fi
+            echo "Attempt $ATTEMPT… waiting 10s"
+            sleep 10
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+      - name: 运行脚本
+        run: |
+          chmod +x assets/whitelist-blacklist/main.py
+          # 传入多URL
+          python assets/whitelist-blacklist/main.py "${{ github.event.inputs.source_urls }}"
+
+      - name: 暂存文件
+        run: git add --force assets/whitelist-blacklist/*.txt
+        continue-on-error: true
+
+      - name: 提交并推送
+        run: |
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --cached --name-only | grep -q .; then
+            git fetch origin main
+            git commit -m "黑白名单 Update: $(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M') (CST)"
+            git push origin HEAD:$GITHUB_REF_NAME --force
+            echo "✅ 推送完成"
+          else
+            echo "ℹ️ 无变更，跳过"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
